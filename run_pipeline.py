@@ -124,8 +124,10 @@ async def run_once():
             stories_linked += 1
             logger.info(f"   -> Story cluster: {story_id[:8]}...")
 
-    # ── Save graph ──
+    # ── Save graph + entity resolver cache ──
     save_graph(graph)
+    from graph.entity_resolver import get_resolver
+    get_resolver().save_cache()
     graph_stats = get_graph_stats(graph)
 
     # ── Summary ──

@@ -348,6 +348,8 @@ project/
 3. **Priority reranking** — boost results that align with user interest vector
 4. **Story following** — if user asked about a story before, proactively surface updates
 5. **MCP tool: `get_personalized_feed(user_id)`** — daily briefing tailored to user
+6. **Contextualized entity resolution** — Current entity resolver uses static Gemini embeddings of isolated name strings (e.g., embed "Trump" alone). This misses context: "Apple" in a tech article vs "Apple" in a food article produce identical embeddings. **Upgrade path:** Run a local transformer (spaCy `en_core_web_trf` or HuggingFace BERT/RoBERTa), extract the **per-token hidden state** for the entity span *after* self-attention has let it absorb surrounding context. This gives a contextualized token embedding — the entity vector "knows" what sentence it appeared in. Tradeoff: requires a ~500MB local model instead of an API call.
+7. **Causal event chains** — Current `CONTINUES` edge only means "same story". Add `LED_TO` / `CAUSED` edges via LLM reasoning to track causal relationships between events (e.g., "sanctions imposed" → "ambassador recalled").
 
 ---
 

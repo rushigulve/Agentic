@@ -69,4 +69,6 @@ GRAPH_PATH = DATA_DIR / "graph.json"       # persisted NetworkX graph
 STORY_TIME_WINDOW_DAYS = 7                 # articles within N days can be same story
 STORY_MIN_SHARED_ENTITIES = 2              # min shared entities to consider a link
 STORY_LLM_MODEL = "openai/gpt-5.4-nano"   # model for story continuation confirmation
+ENTITY_SIMILARITY_THRESHOLD = 0.75         # cosine sim threshold for entity merging
+ENTITY_CACHE_PATH = DATA_DIR / "entity_embeddings.json"
 

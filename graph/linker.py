@@ -4,15 +4,19 @@ graph/linker.py
 Links articles to entities in the knowledge graph.
 Called after entity extraction in the pipeline.
 
+Entities are resolved through the EntityResolver before being added to the graph,
+so "Trump", "Donald Trump", "President Trump" all map to the same canonical node.
+
 Creates:
     - Article nodes
-    - Entity nodes (idempotent)
+    - Entity nodes (resolved to canonical names)
     - MENTIONS edges (Article -> Entity)
     - RELATED_TO edges (Entity -> Entity) for co-occurring entities
 """
 
 import logging
 from graph import graph_store
+from graph.entity_resolver import get_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,10 @@ def link_article(
 ):
     """
     Link an article to its entities in the graph.
+
+    Entities are resolved to canonical names before linking,
+    so name variants (e.g., "Trump" / "Donald Trump") merge
+    into a single graph node.
 
     Args:
         graph: NetworkX DiGraph
@@ -48,10 +56,14 @@ def link_article(
     if not entities:
         return graph
 
-    # 2. Add entity nodes + MENTIONS edges
+    # 2. Resolve entities to canonical names
+    resolver = get_resolver()
+    resolved_entities = resolver.resolve_entities(entities)
+
+    # 3. Add entity nodes + MENTIONS edges
     entity_nodes = []
 
-    for entity in entities:
+    for entity in resolved_entities:
         entity_node = graph_store.add_entity_node(
             graph,
             name=entity["name"],
@@ -67,7 +79,7 @@ def link_article(
             relation="MENTIONS",
         )
 
-    # 3. Build RELATED_TO edges between co-occurring entities
+    # 4. Build RELATED_TO edges between co-occurring entities
     #    Two entities that appear in the same article are related
     for i in range(len(entity_nodes)):
         for j in range(i + 1, len(entity_nodes)):
@@ -89,9 +101,9 @@ def link_article(
                     weight=1,
                 )
 
-    entity_names = [e["name"] for e in entities]
+    entity_names = [e["name"] for e in resolved_entities]
     logger.info(
-        f"  [linker] Linked article to {len(entities)} entities: "
+        f"  [linker] Linked article to {len(resolved_entities)} entities: "
         f"{entity_names[:4]}{'...' if len(entity_names) > 4 else ''}"
     )
 
