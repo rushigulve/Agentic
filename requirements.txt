@@ -1,0 +1,18 @@
+# ─────────────────────────────────────────
+# Agentic News Intelligence System
+# ─────────────────────────────────────────
+
+# Existing (already installed)
+openai
+google-generativeai
+qdrant-client
+mcp
+httpx
+python-dotenv
+
+# Phase 1 — New
+aiosqlite          # async SQLite for article metadata
+spacy              # NLP: entity extraction + sentence segmentation
+apscheduler        # periodic pipeline scheduling
+numpy              # vector similarity computations (used by chunker)
+networkx           # knowledge graph (Phase 2)
