@@ -16,3 +16,5 @@ spacy              # NLP: entity extraction + sentence segmentation
 apscheduler        # periodic pipeline scheduling
 numpy              # vector similarity computations (used by chunker)
 networkx           # knowledge graph (Phase 2)
+sentence-transformers # local transformer embeddings (Phase 2 Upgrade)
+torch              # dependency for transformers

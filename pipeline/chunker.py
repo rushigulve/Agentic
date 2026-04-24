@@ -16,26 +16,40 @@ Algorithm:
 
 import numpy as np
 import logging
-from config import SIMILARITY_THRESHOLD, MAX_CHUNK_TOKENS, MIN_CHUNK_SENTENCES
+import asyncio
+import time
+import google.generativeai as genai
+from config import SIMILARITY_THRESHOLD, MAX_CHUNK_TOKENS, MIN_CHUNK_SENTENCES, EMBEDDING_MODEL, EMBED_DELAY_SECONDS
 
 logger = logging.getLogger(__name__)
 
 
-def chunk_article(
+def _embed_for_similarity(text: str) -> list[float]:
+    """
+    Embed text using Gemini with task_type RETRIEVAL_DOCUMENT.
+
+    RETRIEVAL_DOCUMENT tells Gemini to produce embeddings optimized
+    for similarity search — the model's self-attention layers focus
+    on capturing the semantic "topic" of the passage rather than
+    generating a general-purpose embedding.
+    """
+    result = genai.embed_content(
+        model=EMBEDDING_MODEL,
+        content=text,
+        task_type="RETRIEVAL_DOCUMENT",
+    )
+    return result["embedding"]
+
+
+async def chunk_article(
     text: str,
     nlp,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
 ) -> list[str]:
     """
-    Split article text into semantically coherent chunks.
-
-    Args:
-        text: full article text
-        nlp: loaded spaCy model (en_core_web_md with word vectors)
-        similarity_threshold: cosine sim below this triggers a split
-
-    Returns:
-        list of text chunks, each covering one coherent topic segment
+    Split article text into semantically coherent chunks using
+    Gemini embeddings (self-attention, RETRIEVAL task type) on
+    stop-word-filtered text.
     """
     if not text or not text.strip():
         return []
@@ -46,8 +60,8 @@ def chunk_article(
     if len(sentences) <= 1:
         return [text.strip()]
 
-    # compute similarity between consecutive sentences
-    similarities = _compute_similarities(sentences)
+    # compute similarity between consecutive sentences using Gemini RETRIEVAL embeddings
+    similarities = await _compute_similarities_gemini(sentences)
 
     # find split points where similarity drops below threshold
     split_indices = _find_split_points(similarities, similarity_threshold)
@@ -72,30 +86,47 @@ def chunk_article(
     return chunks
 
 
-def _compute_similarities(sentences) -> list[float]:
+async def _compute_similarities_gemini(sentences) -> list[float]:
     """
-    Compute cosine similarity between consecutive sentence pairs.
+    Compute cosine similarity between consecutive sentence pairs
+    using Gemini embeddings (task_type=RETRIEVAL_DOCUMENT) on text
+    with stop words removed.
+    """
+    # 1. Prepare cleaned text for each sentence
+    cleaned_texts = []
+    for sent in sentences:
+        meaningful_tokens = [
+            t.text for t in sent
+            if not t.is_stop and not t.is_punct and t.text.strip()
+        ]
+        clean_text = " ".join(meaningful_tokens)
+        cleaned_texts.append(clean_text if clean_text else sent.text.strip())
 
-    Uses spaCy's built-in 300d word vectors from en_core_web_md.
-    Returns list of len(sentences) - 1 similarity scores.
-    """
+    # 2. Embed each sentence via Gemini with RETRIEVAL_DOCUMENT task type
+    #    Run in executor to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    embeddings = []
+    for text in cleaned_texts:
+        vec = await loop.run_in_executor(None, _embed_for_similarity, text)
+        await asyncio.sleep(EMBED_DELAY_SECONDS)
+        embeddings.append(vec)
+
+    # 3. Compute cosine similarity between consecutive pairs
     similarities = []
+    for i in range(len(embeddings) - 1):
+        v1 = np.array(embeddings[i])
+        v2 = np.array(embeddings[i + 1])
 
-    for i in range(len(sentences) - 1):
-        sent_a = sentences[i]
-        sent_b = sentences[i + 1]
-
-        # spaCy .similarity() uses cosine similarity of averaged word vectors
-        # returns 0-1 for en_core_web_md
-        if sent_a.vector_norm and sent_b.vector_norm:
-            sim = sent_a.similarity(sent_b)
+        norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+        if norm > 0:
+            sim = np.dot(v1, v2) / norm
         else:
-            # fallback if vectors are zero (rare edge case)
-            sim = 1.0  # don't split on unknown vectors
+            sim = 0.0
 
-        similarities.append(sim)
+        similarities.append(float(sim))
 
     return similarities
+
 
 
 def _find_split_points(
@@ -202,3 +233,43 @@ def _cap_large_chunks(chunks: list[str], max_tokens: int) -> list[str]:
             result.append(" ".join(current))
 
     return result
+
+async def test_chunker():
+    # load spacy 
+    import spacy
+    nlp = spacy.load("en_core_web_md")
+    text = """
+    Russian President Vladimir Putin on Friday warned the West against sending troops to Ukraine, calling it a dangerous escalation that could trigger a wider conflict. 
+    Speaking at a news conference in Moscow, Putin said such a move would be perceived as direct intervention and would have devastating consequences. 
+    Meanwhile, Ukraine’s foreign minister urged NATO allies to reconsider their “hesitation” and provide Kyiv with the weapons it needs to defend itself. 
+    SRH won the IPL match 54 against CSK by 16 runs at Chepauk. 
+    The beach is full of turtles due to breeding season.
+    """
+    
+    doc = nlp(text)
+    sentences = [s for s in doc.sents if s.text.strip()]
+    
+    print("="*60)
+    print("SENTENCE SIMILARITIES (GEMINI RETRIEVAL + SELF-ATTENTION + NO STOP WORDS)")
+    print("="*60)
+    
+    # Use the same logic as the chunker for similarity
+    similarities = await _compute_similarities_gemini(sentences)
+    
+    for i, sim in enumerate(similarities):
+        s1 = sentences[i].text.strip().replace("\n", " ")
+        s2 = sentences[i+1].text.strip().replace("\n", " ")
+        print(f"S{i+1} vs S{i+2}: {sim:.4f}")
+        print(f"  S{i+1}: {s1[:60]}...")
+        print(f"  S{i+2}: {s2[:60]}...")
+        print("-" * 30)
+
+    print("\n" + "="*60)
+    print("FINAL CHUNKS")
+    print("="*60)
+    chunks = await chunk_article(text, nlp)
+    for i, chunk in enumerate(chunks):
+        print(f"Chunk {i+1}: {len(chunk.split())} words\n{chunk.strip()}\n")
+
+if __name__ == "__main__":
+    asyncio.run(test_chunker())
