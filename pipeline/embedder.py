@@ -5,56 +5,57 @@ Orchestrates the embed + store step for processed articles.
 Takes chunks and metadata, pushes them into Qdrant via vector_store.
 """
 
-import logging
 from db import vector_store, sqlite_store
+from pipeline.enricher import enrich_all
+from pipeline.chunker import HierarchicalChunk
+import logging
 
 logger = logging.getLogger(__name__)
 
 
 async def embed_and_store(
     article_id: str,
-    chunks: list[str],
+    chunks: list[HierarchicalChunk],
     entities: list[dict],
     article: dict,
 ) -> int:
     """
-    Embed article chunks and store them in Qdrant.
-    Marks the article as processed in SQLite after success.
-
-    Args:
-        article_id: UUID from SQLite
-        chunks: list of text chunks from chunker
-        entities: list of entity dicts from extractor
-        article: original article dict with metadata
-
-    Returns:
-        Number of chunks stored
+    Enrich, embed, and store hierarchical chunks in Qdrant.
     """
     if not chunks:
         logger.warning(f"  [embedder] No chunks to embed for article {article_id}")
         return 0
 
-    # prepare metadata payload for Qdrant
-    metadata = {
+    # 1. Prepare metadata
+    # We pass entity names into the metadata for enrichment
+    article_metadata = {
         "title": article.get("title", ""),
         "source": article.get("source", ""),
         "published_at": article.get("published_at", ""),
         "category": article.get("category", ""),
-        "entities": [e["name"] for e in entities],  # store just names in payload
+        "entities": [e["name"] for e in entities],
     }
+    
+    # Update chunk metadata
+    for chunk in chunks:
+        chunk.metadata.update(article_metadata)
 
     try:
-        num_stored = await vector_store.store_chunks(
+        # 2. Enrichment Step (LLM-based summaries/questions)
+        logger.info(f"  [embedder] Enriching {len(chunks)} chunks with LLM context...")
+        enriched_chunks = await enrich_all(chunks)
+
+        # 3. Store in Qdrant with Named Vectors
+        num_stored = await vector_store.store_enriched_chunks(
             article_id=article_id,
-            chunks=chunks,
-            metadata=metadata,
+            enriched_chunks=enriched_chunks,
         )
 
         # mark as processed in SQLite
         await sqlite_store.mark_processed(article_id)
 
         logger.info(
-            f"  [embedder] Stored {num_stored} chunks for "
+            f"  [embedder] Stored {num_stored} enriched chunks for "
             f"\"{article.get('title', '')[:50]}...\""
         )
         return num_stored

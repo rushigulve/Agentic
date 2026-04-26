@@ -14,225 +14,188 @@ Algorithm:
     6. Cap oversized chunks
 """
 
-import numpy as np
 import logging
 import asyncio
-import time
-import google.generativeai as genai
-from config import SIMILARITY_THRESHOLD, MAX_CHUNK_TOKENS, MIN_CHUNK_SENTENCES, EMBEDDING_MODEL, EMBED_DELAY_SECONDS
+from typing import List, NamedTuple
+from google import genai
+from config import (
+    SIMILARITY_THRESHOLD, PARENT_CHUNK_SIZE, CHILD_CHUNK_SIZE, 
+    CHUNK_OVERLAP_PERCENT, EMBEDDING_MODEL, EMBED_DELAY_SECONDS, GEMINI_API_KEY
+)
 
+# Initialize GenAI Client
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 logger = logging.getLogger(__name__)
 
+class HierarchicalChunk(NamedTuple):
+    parent_text: str
+    child_text: str
+    metadata: dict = {}
 
-def _embed_for_similarity(text: str) -> list[float]:
-    """
-    Embed text using Gemini with task_type RETRIEVAL_DOCUMENT.
+import numpy as np
 
-    RETRIEVAL_DOCUMENT tells Gemini to produce embeddings optimized
-    for similarity search — the model's self-attention layers focus
-    on capturing the semantic "topic" of the passage rather than
-    generating a general-purpose embedding.
-    """
-    result = genai.embed_content(
+async def _embed_for_similarity(text: str) -> List[float]:
+    """Embed text using Gemini with task_type RETRIEVAL_DOCUMENT."""
+    result = genai_client.models.embed_content(
         model=EMBEDDING_MODEL,
-        content=text,
-        task_type="RETRIEVAL_DOCUMENT",
+        contents=text,
+        config={"task_type": "RETRIEVAL_DOCUMENT"}
     )
-    return result["embedding"]
+    return result.embeddings[0].values
 
+async def _compute_similarities_gemini(sentences: List[str]) -> List[float]:
+    """Compute cosine similarity between consecutive sentence pairs using Gemini."""
+    if len(sentences) < 2:
+        return []
+    
+    # 1. Embed each sentence
+    # We use a slight delay for rate limiting
+    embeddings = []
+    for text in sentences:
+        vec = await _embed_for_similarity(text)
+        await asyncio.sleep(EMBED_DELAY_SECONDS)
+        embeddings.append(np.array(vec))
+
+    # 2. Compute similarities
+    similarities = []
+    for i in range(len(embeddings) - 1):
+        v1, v2 = embeddings[i], embeddings[i+1]
+        norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+        sim = np.dot(v1, v2) / norm if norm > 0 else 0.0
+        similarities.append(float(sim))
+    
+    return similarities
 
 async def chunk_article(
     text: str,
     nlp,
-    similarity_threshold: float = SIMILARITY_THRESHOLD,
-) -> list[str]:
+    title: str = "Unknown Title",
+) -> List[HierarchicalChunk]:
     """
-    Split article text into semantically coherent chunks using
-    Gemini embeddings (self-attention, RETRIEVAL task type) on
-    stop-word-filtered text.
+    Split article into hierarchical chunks using SEMANTIC VALLEYS to find 
+    optimal split points near the 512/128 word targets.
     """
     if not text or not text.strip():
         return []
 
+    # 1. Parse sentences and compute semantic similarities for the whole doc
     doc = nlp(text)
-    sentences = [sent for sent in doc.sents if sent.text.strip()]
+    sentence_objs = [s for s in doc.sents if s.text.strip()]
+    sentence_texts = [s.text.strip() for s in sentence_objs]
+    
+    if not sentence_texts:
+        return []
+        
+    logger.info(f"  [chunker] Computing semantic map for {len(sentence_texts)} sentences...")
+    similarities = await _compute_similarities_gemini(sentence_texts)
 
-    if len(sentences) <= 1:
-        return [text.strip()]
-
-    # compute similarity between consecutive sentences using Gemini RETRIEVAL embeddings
-    similarities = await _compute_similarities_gemini(sentences)
-
-    # find split points where similarity drops below threshold
-    split_indices = _find_split_points(similarities, similarity_threshold)
-
-    # build chunks from split points
-    chunks = _build_chunks(sentences, split_indices)
-
-    # merge short chunks into neighbors
-    chunks = _merge_short_chunks(chunks, MIN_CHUNK_SENTENCES)
-
-    # cap oversized chunks
-    chunks = _cap_large_chunks(chunks, MAX_CHUNK_TOKENS)
-
-    # final cleanup
-    chunks = [c.strip() for c in chunks if c.strip()]
-
-    logger.info(
-        f"  [chunker] {len(sentences)} sentences → {len(chunks)} chunks "
-        f"(threshold={similarity_threshold})"
+    # 2. Create Overlapping Parent Chunks (Similarity-Aware)
+    parent_indices = _find_semantic_split_indices(
+        items=sentence_texts,
+        similarities=similarities,
+        max_size=PARENT_CHUNK_SIZE,
+        overlap_percent=CHUNK_OVERLAP_PERCENT
     )
+    
+    all_hierarchical_chunks = []
 
-    return chunks
-
-
-async def _compute_similarities_gemini(sentences) -> list[float]:
-    """
-    Compute cosine similarity between consecutive sentence pairs
-    using Gemini embeddings (task_type=RETRIEVAL_DOCUMENT) on text
-    with stop words removed.
-    """
-    # 1. Prepare cleaned text for each sentence
-    cleaned_texts = []
-    for sent in sentences:
-        meaningful_tokens = [
-            t.text for t in sent
-            if not t.is_stop and not t.is_punct and t.text.strip()
-        ]
-        clean_text = " ".join(meaningful_tokens)
-        cleaned_texts.append(clean_text if clean_text else sent.text.strip())
-
-    # 2. Embed each sentence via Gemini with RETRIEVAL_DOCUMENT task type
-    #    Run in executor to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
-    embeddings = []
-    for text in cleaned_texts:
-        vec = await loop.run_in_executor(None, _embed_for_similarity, text)
-        await asyncio.sleep(EMBED_DELAY_SECONDS)
-        embeddings.append(vec)
-
-    # 3. Compute cosine similarity between consecutive pairs
-    similarities = []
-    for i in range(len(embeddings) - 1):
-        v1 = np.array(embeddings[i])
-        v2 = np.array(embeddings[i + 1])
-
-        norm = np.linalg.norm(v1) * np.linalg.norm(v2)
-        if norm > 0:
-            sim = np.dot(v1, v2) / norm
-        else:
-            sim = 0.0
-
-        similarities.append(float(sim))
-
-    return similarities
-
-
-
-def _find_split_points(
-    similarities: list[float],
-    threshold: float,
-) -> list[int]:
-    """
-    Find indices where we should split (0-indexed into similarities list).
-
-    A split happens after sentence[i] when similarity(sentence[i], sentence[i+1])
-    drops below the threshold.
-    """
-    split_points = []
-
-    for i, sim in enumerate(similarities):
-        if sim < threshold:
-            # split AFTER sentence i (so sentence i+1 starts a new chunk)
-            split_points.append(i + 1)
-
-    return split_points
-
-
-def _build_chunks(sentences, split_indices: list[int]) -> list[str]:
-    """Build text chunks from sentences and split points."""
-    if not split_indices:
-        # no splits — whole article is one chunk
-        return [" ".join(sent.text for sent in sentences)]
-
-    chunks = []
-    prev = 0
-
-    for split_idx in split_indices:
-        chunk_sents = sentences[prev:split_idx]
-        if chunk_sents:
-            chunks.append(" ".join(sent.text for sent in chunk_sents))
-        prev = split_idx
-
-    # last chunk
-    if prev < len(sentences):
-        chunks.append(" ".join(sent.text for sent in sentences[prev:]))
-
-    return chunks
-
-
-def _merge_short_chunks(
-    chunks: list[str],
-    min_sentences: int = 2,
-) -> list[str]:
-    """
-    Merge chunks that are too short (fewer than min_sentences)
-    into their nearest neighbor.
-    """
-    if len(chunks) <= 1:
-        return chunks
-
-    merged = []
-
-    for chunk in chunks:
-        # rough sentence count: count periods/exclamation/question marks
-        sentence_count = max(
-            1,
-            chunk.count(". ") + chunk.count("! ") + chunk.count("? ") + 1
+    for start_idx, end_idx in parent_indices:
+        parent_text = " ".join(sentence_texts[start_idx:end_idx])
+        
+        # 3. Create Overlapping Child Chunks for this Parent (Similarity-Aware)
+        # We use the pre-computed similarities for the sub-range
+        child_indices = _find_semantic_split_indices(
+            items=sentence_texts[start_idx:end_idx],
+            similarities=similarities[start_idx:end_idx-1],
+            max_size=CHILD_CHUNK_SIZE,
+            overlap_percent=CHUNK_OVERLAP_PERCENT
         )
 
-        if sentence_count < min_sentences and merged:
-            # merge into previous chunk
-            merged[-1] = merged[-1] + " " + chunk
+        for c_start, c_end in child_indices:
+            # Note: c_start/c_end are relative to parent, so we map back to global
+            global_start = start_idx + c_start
+            global_end = start_idx + c_end
+            child_text = " ".join(sentence_texts[global_start:global_end])
+            
+            all_hierarchical_chunks.append(
+                HierarchicalChunk(
+                    parent_text=parent_text,
+                    child_text=child_text,
+                    metadata={"title": title}
+                )
+            )
+
+    logger.info(
+        f"  [chunker] Created {len(all_hierarchical_chunks)} hierarchical chunks "
+        f"using semantic topic-shift detection."
+    )
+
+    return all_hierarchical_chunks
+
+
+def _find_semantic_split_indices(
+    items: List[str],
+    similarities: List[float],
+    max_size: int,
+    overlap_percent: float
+) -> List[tuple]:
+    """
+    Finds optimal [start, end] sentence indices for chunks by looking for 
+    the 'deepest semantic valley' (lowest similarity) near the target word count.
+    """
+    chunks = []
+    if not items:
+        return []
+
+    overlap_size = int(max_size * overlap_percent)
+    i = 0
+    
+    while i < len(items):
+        # 1. Find the hard limit (max_size words from i)
+        current_weight = 0
+        limit_idx = i
+        while limit_idx < len(items):
+            w = len(items[limit_idx].split())
+            if current_weight + w > max_size and limit_idx > i:
+                break
+            current_weight += w
+            limit_idx += 1
+        
+        # 2. Search for a semantic valley in the 'split zone'
+        # zone = the last 20% of the chunk
+        zone_start = max(i, limit_idx - max(1, int((limit_idx - i) * 0.3)))
+        
+        best_split_idx = limit_idx
+        if zone_start < limit_idx and zone_start < len(similarities):
+            # find min similarity in the zone
+            zone_similarities = similarities[zone_start : limit_idx]
+            if zone_similarities:
+                # relative index of the minimum similarity
+                min_sim_idx = zone_similarities.index(min(zone_similarities))
+                # split AFTER the sentence with min similarity (so sentence + 1)
+                best_split_idx = zone_start + min_sim_idx + 1
+        
+        chunks.append((i, best_split_idx))
+        
+        if best_split_idx >= len(items):
+            break
+
+        # 3. Handle Overlap: backtrack for the next chunk's start
+        backtrack_weight = 0
+        next_start = best_split_idx
+        for k in range(best_split_idx - 1, i, -1):
+            w = len(items[k].split())
+            if backtrack_weight + w > overlap_size:
+                break
+            backtrack_weight += w
+            next_start = k
+            
+        if next_start <= i: # Progress check
+            i = best_split_idx
         else:
-            merged.append(chunk)
-
-    return merged
-
-
-def _cap_large_chunks(chunks: list[str], max_tokens: int) -> list[str]:
-    """
-    Split oversized chunks at sentence boundaries.
-    A 'token' here is approximately a whitespace-separated word.
-    """
-    result = []
-
-    for chunk in chunks:
-        words = chunk.split()
-        if len(words) <= max_tokens:
-            result.append(chunk)
-            continue
-
-        # split on sentence boundaries within the chunk
-        # simple approach: split on ". " and rebuild
-        sentences = chunk.replace("! ", "!|").replace("? ", "?|").replace(". ", ".|").split("|")
-        current = []
-        current_len = 0
-
-        for sent in sentences:
-            sent_len = len(sent.split())
-            if current_len + sent_len > max_tokens and current:
-                result.append(" ".join(current))
-                current = [sent]
-                current_len = sent_len
-            else:
-                current.append(sent)
-                current_len += sent_len
-
-        if current:
-            result.append(" ".join(current))
-
-    return result
+            i = next_start
+            
+    return chunks
 
 async def test_chunker():
     # load spacy 
@@ -241,35 +204,24 @@ async def test_chunker():
     text = """
     Russian President Vladimir Putin on Friday warned the West against sending troops to Ukraine, calling it a dangerous escalation that could trigger a wider conflict. 
     Speaking at a news conference in Moscow, Putin said such a move would be perceived as direct intervention and would have devastating consequences. 
+    
     Meanwhile, Ukraine’s foreign minister urged NATO allies to reconsider their “hesitation” and provide Kyiv with the weapons it needs to defend itself. 
+    
     SRH won the IPL match 54 against CSK by 16 runs at Chepauk. 
     The beach is full of turtles due to breeding season.
-    """
+    """ * 3 # Repeat to trigger splits
     
-    doc = nlp(text)
-    sentences = [s for s in doc.sents if s.text.strip()]
-    
+    print("\n" + "="*60)
+    print("HIERARCHICAL CHUNKS TEST")
     print("="*60)
-    print("SENTENCE SIMILARITIES (GEMINI RETRIEVAL + SELF-ATTENTION + NO STOP WORDS)")
-    print("="*60)
-    
-    # Use the same logic as the chunker for similarity
-    similarities = await _compute_similarities_gemini(sentences)
-    
-    for i, sim in enumerate(similarities):
-        s1 = sentences[i].text.strip().replace("\n", " ")
-        s2 = sentences[i+1].text.strip().replace("\n", " ")
-        print(f"S{i+1} vs S{i+2}: {sim:.4f}")
-        print(f"  S{i+1}: {s1[:60]}...")
-        print(f"  S{i+2}: {s2[:60]}...")
+    chunks = await chunk_article(text, nlp, title="World News & Sports")
+    for i, chunk in enumerate(chunks):
+        print(f"--- Chunk {i+1} ---")
+        print(f"Parent ({len(chunk.parent_text.split())} words): {chunk.parent_text[:100]}...")
+        print(f"Child ({len(chunk.child_text.split())} words): {chunk.child_text}")
         print("-" * 30)
 
-    print("\n" + "="*60)
-    print("FINAL CHUNKS")
-    print("="*60)
-    chunks = await chunk_article(text, nlp)
-    for i, chunk in enumerate(chunks):
-        print(f"Chunk {i+1}: {len(chunk.split())} words\n{chunk.strip()}\n")
-
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(test_chunker())

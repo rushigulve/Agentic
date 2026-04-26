@@ -34,7 +34,7 @@ async def run_once():
     Execute the full pipeline once:
         fetch → dedup → extract entities → chunk → embed → graph link → store
     """
-    from pipeline.fetcher import fetch_all_categories
+    from pipeline.exa_fetcher import fetch_exa_news
     from pipeline.dedup import deduplicate
     from pipeline.extractor import load_nlp, extract_entities
     from pipeline.chunker import chunk_article
@@ -45,13 +45,13 @@ async def run_once():
     from graph.story_detector import detect_stories
 
     logger.info("=" * 60)
-    logger.info("PIPELINE RUN STARTED")
+    logger.info("PIPELINE RUN STARTED (EXA MODE)")
     logger.info("=" * 60)
 
-    # ── Step 1: Fetch ──
-    logger.info("\n[FETCH] Step 1: Fetching articles...")
-    raw_articles = await fetch_all_categories()
-    logger.info(f"   Fetched {len(raw_articles)} articles from GNews")
+    # ── Step 1: Fetch (Full Text) ──
+    logger.info("\n[FETCH] Step 1: Fetching full-text news via Exa...")
+    raw_articles = await fetch_exa_news()
+    logger.info(f"   Fetched {len(raw_articles)} full articles")
 
     if not raw_articles:
         logger.info("   No articles fetched — skipping pipeline")
@@ -89,8 +89,8 @@ async def run_once():
         entity_names = [e["name"] for e in entities]
         logger.info(f"   → Entities: {entity_names[:5]}{'...' if len(entity_names) > 5 else ''}")
 
-        # semantic chunking
-        chunks = chunk_article(full_text, nlp)
+        # hierarchical chunking
+        chunks = await chunk_article(full_text, nlp, title=article.get("title", "Unknown"))
         logger.info(f"   → Chunks: {len(chunks)}")
 
         # embed and store in Qdrant

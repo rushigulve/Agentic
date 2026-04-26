@@ -20,6 +20,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY")
 QDRANT_CLUSTER_URL = os.environ.get("QDRANT_CLUSTER_URL")
 GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY")
+EXA_API_KEY = os.environ.get("EXA_API_KEY")
 
 # ─────────────────────────────────────────
 # QDRANT
@@ -29,12 +30,21 @@ QDRANT_COLLECTION = "news_articles"       # separate from existing 'agent_memory
 VECTOR_SIZE = 3072                         # gemini-embedding-001 output dimensions
 
 # ─────────────────────────────────────────
-# CHUNKING
+# CHUNKING (Hierarchical)
 # ─────────────────────────────────────────
 
-SIMILARITY_THRESHOLD = 0.5                 # cosine similarity threshold for chunk splits
-MAX_CHUNK_TOKENS = 800                     # hard cap on chunk size (word count)
-MIN_CHUNK_SENTENCES = 2                    # minimum sentences per chunk
+PARENT_CHUNK_SIZE = 512                    # words (context window for LLM)
+CHILD_CHUNK_SIZE = 128                     # words (retrieval precision)
+CHUNK_OVERLAP_PERCENT = 0.15               # 15% overlap between siblings
+SIMILARITY_THRESHOLD = 0.5                 # semantic boundary threshold
+
+# ─────────────────────────────────────────
+# ENRICHMENT
+# ─────────────────────────────────────────
+
+# Prompts for semantic enrichment
+SUMMARY_PROMPT = "Summarize the core factual claim of this news snippet in one concise sentence."
+QUESTION_PROMPT = "What is the single most likely question a user would ask that this specific text answers perfectly?"
 
 # ─────────────────────────────────────────
 # PIPELINE
@@ -42,7 +52,8 @@ MIN_CHUNK_SENTENCES = 2                    # minimum sentences per chunk
 
 FETCH_INTERVAL_MINUTES = 15                # how often the scheduler runs
 GNEWS_CATEGORIES = ["general", "technology"]
-GNEWS_MAX_RESULTS = 10                     # articles per category per fetch
+GNEWS_MAX_RESULTS = 5                      # articles per category per fetch
+EXA_MAX_RESULTS = 5                        # articles per search
 GNEWS_LANGUAGE = "en"
 GNEWS_COUNTRY = "in"                       # India; change as needed
 
@@ -58,7 +69,7 @@ SQLITE_DB_PATH = DATA_DIR / "news.db"
 # EMBEDDING
 # ─────────────────────────────────────────
 
-EMBEDDING_MODEL = "models/gemini-embedding-001"
+EMBEDDING_MODEL = "models/gemini-embedding-2"
 EMBED_DELAY_SECONDS = 0.25                 # rate limit between embed calls
 
 # ─────────────────────────────────────────

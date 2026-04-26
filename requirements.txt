@@ -4,7 +4,7 @@
 
 # Existing (already installed)
 openai
-google-generativeai
+google-genai
 qdrant-client
 mcp
 httpx
@@ -12,6 +12,7 @@ python-dotenv
 
 # Phase 1 — New
 aiosqlite          # async SQLite for article metadata
+exa-py
 spacy              # NLP: entity extraction + sentence segmentation
 apscheduler        # periodic pipeline scheduling
 numpy              # vector similarity computations (used by chunker)
